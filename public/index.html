@@ -167,6 +167,14 @@
     <!-- 配置 -->
     <section data-pane="config" class="tabhide">
       <div class="panel admin">
+        <h2>工作室时区与班次窗口</h2>
+        <div class="row">
+          <div><label>工作室本地时区（IANA，如 Asia/Shanghai）</label><input id="cfgTimeZone" placeholder="Asia/Shanghai"></div>
+          <div style="flex:0"><button class="btn" id="cfgTzSave">保存时区</button></div>
+        </div>
+        <div class="muted small" style="margin-top:6px">巡检窗口与宽限期一律按此时区解释并展示；修改时区后新生成的巡检生效，历史巡检保留其生成时窗口。</div>
+      </div>
+      <div class="panel admin">
         <h2>房间 / 监测点</h2>
         <div id="cfgPoints"></div>
         <details>

@@ -45,6 +45,85 @@ export const ESCALATE_RUN = 3; // 连续 3 次异常升级为严重
 export const BACKFILL_WINDOW_MS = 7 * 24 * 3600 * 1000;
 export const FUTURE_TOLERANCE_MS = 2 * 60 * 1000;
 export const SUBMIT_GRACE_MS = 60 * 60 * 1000;
+export const DEFAULT_TIMEZONE = "Asia/Shanghai";
+
+// ---------- 工作室本地时区（班次窗口一律按此时区解释，服务端部署时区无关） ----------
+export function isValidTimeZone(tz) {
+  if (!tz || typeof tz !== "string") return false;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// 某一 UTC 时刻在工作室本地时区的偏移（分钟，含 DST）
+function tzOffsetMinutes(date, timeZone) {
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone, hour12: false,
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+  });
+  const parts = Object.fromEntries(dtf.formatToParts(date).filter((p) => p.type !== "literal").map((p) => [p.type, p.value]));
+  const asUTC = Date.UTC(+parts.year, +parts.month - 1, +parts.day, +parts.hour % 24, +parts.minute, +parts.second);
+  return Math.round((asUTC - date.getTime()) / 60000);
+}
+
+// 工作室本地日期 + HH:MM → 绝对时间（ms）。两遍计算以消除 DST/偏移歧义。
+function localDateTimeMs(localDateStr, hhmm, timeZone) {
+  const [h, m] = hhmm.split(":").map(Number);
+  const guessUtc = new Date(`${localDateStr}T00:00:00Z`).getTime();
+  const off1 = tzOffsetMinutes(new Date(guessUtc), timeZone);
+  const approx = guessUtc + h * 3600000 + m * 60000 - off1 * 60000;
+  const off2 = tzOffsetMinutes(new Date(approx), timeZone);
+  return guessUtc + h * 3600000 + m * 60000 - off2 * 60000;
+}
+
+// 供页面/预检展示的本地窗口时间（始终是工作室墙上时间）
+export function formatLocalWindow(date, hhmm, timeZone) {
+  return `${date} ${hhmm}`;
+}
+
+// UTC ISO 时间 → 工作室本地 "YYYY-MM-DD HH:MM"（页面展示用）
+export function toLocalString(iso, timeZone) {
+  if (!iso) return "";
+  const date = new Date(iso);
+  const dtf = new Intl.DateTimeFormat("en-CA", {
+    timeZone, hour12: false,
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit",
+  });
+  const p = Object.fromEntries(dtf.formatToParts(date).filter((x) => x.type !== "literal").map((x) => [x.type, x.value]));
+  return `${p.year}-${p.month}-${p.day} ${p.hour === "24" ? "00" : p.hour}:${p.minute}`;
+}
+
+export function activeCalibration(db, deviceId, at) {
+  const t = new Date(at).getTime();
+  const list = db.calibrations
+    // 仅“合格 + 有效”的校准可作为有效校准；不合格(fail)或已撤销(void)一律不算
+    .filter((c) => c.deviceId === deviceId && c.status === "valid" && c.result === "pass")
+    .filter((c) => new Date(c.validFrom).getTime() <= t && t <= new Date(c.validUntil).getTime())
+    .sort((a, b) => new Date(b.recordedAt) - new Date(a.recordedAt));
+  return list[0] || null;
+}
+
+// 设备能否用于某监测点：存在、在用、已关联该点、设备指标与该点监测指标匹配
+export function assertDeviceUsable(db, deviceId, pointId) {
+  const dev = db.devices.find((x) => x.id === deviceId);
+  if (!dev) throw httpError(400, "device_not_found");
+  if (dev.status === "retired") throw httpError(409, "device_retired", "设备已报废，禁止用于录入");
+  const point = db.points.find((p) => p.id === pointId);
+  if (!point) throw httpError(404, "point_not_found");
+  if (!dev.pointIds || !dev.pointIds.includes(pointId)) {
+    throw httpError(409, "device_not_linked_to_point", `设备 ${dev.name} 未关联监测点 ${point.name}`);
+  }
+  const deviceMetric = dev.metric === "temperature" ? "temp" : dev.metric;
+  if (!point.metrics.includes(deviceMetric)) {
+    throw httpError(409, "device_metric_mismatch", `设备 ${dev.name} 的指标与监测点 ${point.name} 不匹配`);
+  }
+  return dev;
+}
 
 export const DEFAULT_SHIFTS = [
   { code: "M", name: "早班", start: "06:00", end: "14:00" },
@@ -54,15 +133,6 @@ export const DEFAULT_SHIFTS = [
 
 export function nowIso(now = new Date()) {
   return now.toISOString();
-}
-
-export function activeCalibration(db, deviceId, at) {
-  const t = new Date(at).getTime();
-  const list = db.calibrations
-    .filter((c) => c.deviceId === deviceId && c.status === "valid")
-    .filter((c) => new Date(c.validFrom).getTime() <= t && t <= new Date(c.validUntil).getTime())
-    .sort((a, b) => new Date(b.recordedAt) - new Date(a.recordedAt));
-  return list[0] || null;
 }
 
 // 返回 { normal:boolean, severity:'normal'|'warning'|'critical', reasons:[] }
@@ -110,17 +180,22 @@ export function buildReadingRecords(db, input, { now = new Date() } = {}) {
   const keys = Object.keys(values).filter((k) => METRICS[k]);
   if (!keys.length) throw httpError(400, "no_metric_values");
   const deviceId = input.deviceId || null;
-  if (deviceId && !db.devices.some((d) => d.id === deviceId)) throw httpError(400, "device_not_found");
+  let deviceMetric = null;
+  if (deviceId) {
+    const dev = assertDeviceUsable(db, deviceId, point.id); // 写入前拒绝：未关联/报废
+    deviceMetric = dev.metric === "temperature" ? "temp" : dev.metric;
+  }
   let cal = null;
   if (deviceId) {
     cal = activeCalibration(db, deviceId, input.measuredAt);
-    if (!cal) {
-      // 仍允许读数落库，但自动产生“校准失效”异常
-    }
+    // 无有效校准（过期、缺失或最近校准不合格）仍允许读数落库，但自动产生“校准失效”异常
   }
   return keys.map((metric) => {
     if (!allowed.includes(metric)) {
       throw httpError(409, "metric_not_allowed_for_point", `${point.name} 不监测 ${METRICS[metric].label}`);
+    }
+    if (deviceId && deviceMetric !== metric) {
+      throw httpError(409, "device_metric_mismatch", "设备指标与本次读数指标不匹配");
     }
     const value = Number(values[metric]);
     const th = point.thresholds?.[metric] || null;
@@ -216,14 +291,30 @@ export function rebuildAlerts(db, affected, genId) {
   }
 }
 
-// ---------- 巡检班次 ----------
-export function shiftWindow(dateStr, shift) {
-  const [sh, sm] = shift.start.split(":").map(Number);
-  const [eh, em] = shift.end.split(":").map(Number);
-  const start = new Date(`${dateStr}T${shift.start}:00`);
-  let end = new Date(`${dateStr}T${shift.end}:00`);
-  if (end <= start) end = new Date(end.getTime() + 24 * 3600 * 1000); // 夜班跨天
-  return { start, end, sh, sm, eh, em };
+// ---------- 巡检班次（窗口按工作室本地时区解释，夜班跨本地午夜） ----------
+export function shiftWindow(dateStr, shift, timeZone = DEFAULT_TIMEZONE) {
+  const startMs = localDateTimeMs(dateStr, shift.start, timeZone);
+  let endMs = localDateTimeMs(dateStr, shift.end, timeZone);
+  if (endMs <= startMs) endMs += 24 * 3600 * 1000; // 夜班跨天
+  return {
+    start: new Date(startMs),
+    end: new Date(endMs),
+    localStart: `${dateStr} ${shift.start}`,
+    localEnd: localDateLabel(new Date(endMs), timeZone) + " " + shift.end,
+    timeZone,
+  };
+}
+
+// UTC 时刻 → 工作室本地日期 YYYY-MM-DD
+export function localDateLabel(date, timeZone = DEFAULT_TIMEZONE) {
+  const dtf = new Intl.DateTimeFormat("en-CA", {
+    timeZone, year: "numeric", month: "2-digit", day: "2-digit",
+  });
+  return dtf.format(date);
+}
+
+export function getTimeZone(db) {
+  return isValidTimeZone(db.config?.timeZone) ? db.config.timeZone : DEFAULT_TIMEZONE;
 }
 
 export function getShift(db, code) {

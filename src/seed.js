@@ -78,6 +78,6 @@ export function buildSeed({ now = new Date() } = {}) {
     inspections: [],
     rectifications: [],
     idem: {},
-    config: { shifts: DEFAULT_SHIFTS, backfillDays: 7, escalateRun: 3 },
+    config: { timeZone: "Asia/Shanghai", shifts: DEFAULT_SHIFTS, backfillDays: 7, escalateRun: 3 },
   };
 }

@@ -3,7 +3,8 @@ import { randomUUID } from "node:crypto";
 import {
   METRICS, SCENES,
   buildReadingRecords, assertNotDuplicate, rebuildAlerts, activeCalibration,
-  getShift, shiftWindow, sweepMissedInspections, nowIso,
+  getShift, shiftWindow, sweepMissedInspections, nowIso, getTimeZone,
+  toLocalString, localDateLabel, isValidTimeZone, DEFAULT_TIMEZONE,
 } from "./domain.js";
 import { httpError } from "./store.js";
 import { hashPw } from "./seed.js";
@@ -75,7 +76,10 @@ export function createApp(store) {
       return json(res, 200, { token, user: sanitizeUser(u) });
     }
     if (pathname === "/api/me" && req.method === "GET") {
-      return json(res, 200, { user: sanitizeUser(user), metrics: METRICS, scenes: sceneView(), shifts: db.config.shifts });
+      return json(res, 200, {
+        user: sanitizeUser(user), metrics: METRICS, scenes: sceneView(),
+        shifts: db.config.shifts, timeZone: getTimeZone(db),
+      });
     }
     if (pathname === "/api/auth/logout" && req.method === "POST") {
       const token = req.headers.authorization.slice(7);
@@ -328,10 +332,11 @@ export function createApp(store) {
     // ---------- 巡检 ----------
     if (pathname === "/api/inspections/generate" && req.method === "POST") {
       requireRole(user, "admin", "safety");
-      const date = body.date || now.toISOString().slice(0, 10);
+      const tz = getTimeZone(db);
+      const date = body.date || localDateLabel(now, tz); // 默认“工作室本地今天”，不是 UTC 日期
       if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw httpError(400, "invalid_date");
       const shift = getShift(db, body.shiftCode);
-      const { start, end } = shiftWindow(date, shift);
+      const win = shiftWindow(date, shift, tz);
       const out = await store.mutate((d) => {
         if (d.inspections.some((x) => x.date === date && x.shiftCode === shift.code)) {
           throw httpError(409, "inspection_already_generated", `${date} ${shift.name} 巡检已生成`);
@@ -341,8 +346,9 @@ export function createApp(store) {
             .filter((p) => p.roomId === room.id && p.status === "active")
             .map((p) => ({ pointId: p.id, status: null, note: "", submittedAt: null, submittedBy: null }));
           return {
-            id: id("IN"), roomId: room.id, date, shiftCode: shift.code, shiftName: shift.name,
-            windowStart: start.toISOString(), windowEnd: end.toISOString(),
+            id: id("IN"), roomId: room.id, date, shiftCode: shift.code, shiftName: shift.name, timeZone: tz,
+            windowStart: win.start.toISOString(), windowEnd: win.end.toISOString(),
+            localWindowStart: win.localStart, localWindowEnd: win.localEnd,
             status: items.length ? "pending" : "no_points", items,
             generatedAt: nowIso(now), generatedBy: user.id,
           };
@@ -369,30 +375,52 @@ export function createApp(store) {
     }
     const insSubmit = pathname.match(/^\/api\/inspections\/([^/]+)\/submit$/);
     if (insSubmit && req.method === "POST") {
+      // 预检（不落任何写入）
+      const pre = db.inspections.find((x) => x.id === insSubmit[1]);
+      if (!pre) throw httpError(404, "inspection_not_found");
+      scopeRoom(user, pre.roomId);
+      if (pre.status === "missed") throw httpError(409, "inspection_missed", "该巡检已漏检，禁止补交");
+      if (pre.status === "submitted") {
+        throw httpError(409, "inspection_already_submitted", "巡检已提交，禁止重复提交");
+      }
+      if (pre.status === "no_points") throw httpError(409, "inspection_no_points");
+      const tnow = now.getTime();
+      if (tnow < new Date(pre.windowStart).getTime()) {
+        throw httpError(409, "inspection_not_started", "班次未开始，禁止越点提交");
+      }
+      // 超过宽限期：漏检状态与漏检时间单独提交落盘（提交体一律拒绝），保证查询持久可见
+      if (tnow > new Date(pre.windowEnd).getTime() + 60 * 60 * 1000) {
+        const marked = await store.mutate((d) => {
+          const ins = d.inspections.find((x) => x.id === pre.id);
+          if (ins.status === "pending") {
+            ins.status = "missed";
+            ins.missedAt = nowIso(now);
+          }
+          return inspectionView(d, user)(ins);
+        });
+        return json(res, 409, {
+          error: "inspection_missed",
+          detail: "已超过提交宽限期，按漏检处理",
+          inspection: marked.body,
+        });
+      }
+      // 载荷校验（仍在窗口内，未通过不落任何写入）
+      const results = Array.isArray(body.results) ? body.results : [];
+      const expected = pre.items.map((x) => x.pointId);
+      const got = results.map((x) => x.pointId);
+      const extra = got.filter((p) => !expected.includes(p));
+      const missing = expected.filter((p) => !got.includes(p));
+      if (extra.length) throw httpError(409, "inspection_extra_points", { extra });
+      if (missing.length) throw httpError(409, "inspection_missing_points", { missing });
+      if (new Set(got).size !== got.length) throw httpError(409, "inspection_duplicate_points");
+      for (const r of results) {
+        if (!["ok", "abnormal"].includes(r.status)) throw httpError(400, "invalid_item_status");
+        if (r.status === "abnormal" && !(r.note || "").trim()) throw httpError(422, "abnormal_requires_note");
+      }
       const out = await store.mutate((d) => {
-        const ins = d.inspections.find((x) => x.id === insSubmit[1]);
-        if (!ins) throw httpError(404, "inspection_not_found");
-        scopeRoom(user, ins.roomId);
-        if (!["pending"].includes(ins.status)) {
-          throw httpError(409, "inspection_already_submitted", `巡检状态 ${ins.status}，禁止重复提交`);
-        }
-        const tnow = now.getTime();
-        if (tnow < new Date(ins.windowStart).getTime()) throw httpError(409, "inspection_not_started", "班次未开始，禁止越点提交");
-        if (tnow > new Date(ins.windowEnd).getTime() + 60 * 60 * 1000) {
-          ins.status = "missed"; ins.missedAt = nowIso(now);
-          throw httpError(409, "inspection_missed", "已超过提交宽限期，按漏检处理");
-        }
-        const results = Array.isArray(body.results) ? body.results : [];
-        const expected = ins.items.map((x) => x.pointId);
-        const got = results.map((x) => x.pointId);
-        const extra = got.filter((p) => !expected.includes(p));
-        const missing = expected.filter((p) => !got.includes(p));
-        if (extra.length) throw httpError(409, "inspection_extra_points", { extra });
-        if (missing.length) throw httpError(409, "inspection_missing_points", { missing });
-        if (new Set(got).size !== got.length) throw httpError(409, "inspection_duplicate_points");
+        const ins = d.inspections.find((x) => x.id === pre.id);
+        if (ins.status !== "pending") throw httpError(409, `inspection_${ins.status}`);
         for (const r of results) {
-          if (!["ok", "abnormal"].includes(r.status)) throw httpError(400, "invalid_item_status");
-          if (r.status === "abnormal" && !(r.note || "").trim()) throw httpError(422, "abnormal_requires_note");
           const item = ins.items.find((x) => x.pointId === r.pointId);
           item.status = r.status;
           item.note = r.note || "";
@@ -457,7 +485,13 @@ export function createApp(store) {
       return json(res, 200, rectView(db, user)(out.body));
     }
 
-    // ---------- 班次配置 / 概览 ----------
+    // ---------- 班次配置 / 时区 / 概览 ----------
+    if (pathname === "/api/config/timezone" && req.method === "PUT") {
+      requireRole(user, "admin");
+      if (!isValidTimeZone(body.timeZone)) throw httpError(400, "invalid_timezone");
+      const out = await store.mutate((d) => { d.config.timeZone = body.timeZone; return d.config.timeZone; });
+      return json(res, 200, { timeZone: out.body });
+    }
     if (pathname === "/api/config/shifts" && req.method === "PUT") {
       requireRole(user, "admin");
       const shifts = body.shifts;
@@ -539,11 +573,18 @@ export function createApp(store) {
     };
   }
   function inspectionView(db, viewer) {
-    return (x) => ({
-      ...x,
-      roomName: db.rooms.find((r) => r.id === x.roomId)?.name,
-      items: x.items.map((it) => ({ ...it, pointName: db.points.find((p) => p.id === it.pointId)?.name })),
-    });
+    return (x) => {
+      const tz = x.timeZone || getTimeZone(db);
+      return {
+        ...x,
+        timeZone: tz,
+        // 页面始终展示工作室本地墙上时间（夜班 22:00–次日 06:00 不会被解释成其他时段）
+        localWindowStart: x.localWindowStart || toLocalString(x.windowStart, tz),
+        localWindowEnd: x.localWindowEnd || toLocalString(x.windowEnd, tz),
+        roomName: db.rooms.find((r) => r.id === x.roomId)?.name,
+        items: x.items.map((it) => ({ ...it, pointName: db.points.find((p) => p.id === it.pointId)?.name })),
+      };
+    };
   }
   function rectView(db, viewer) {
     return (rc) => {

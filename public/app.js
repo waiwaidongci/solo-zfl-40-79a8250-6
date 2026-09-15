@@ -144,29 +144,46 @@ function fillMetrics() {
 function fillDevices() {
   const p = currentPoint();
   const devs = state.devices.filter((d) => d.pointIds?.includes(p?.id));
-  $("#enDevice").innerHTML = `<option value="">不使用设备</option>` +
-    devs.map((d) => `<option value="${d.id}" ${d.calibrationExpired ? "" : ""}>${d.name}${d.calibrationExpired ? "（校准已过期）" : ""}</option>`).join("");
+  const metricLabel = (d) => state.meta.metrics[d.metric === "temperature" ? "temp" : d.metric]?.label || d.metric;
+  $("#enDevice").innerHTML = `<option value="">不使用设备（人工读数）</option>` +
+    devs.map((d) => `<option value="${d.id}">${d.name} · ${metricLabel(d)}${d.calibrationExpired ? "（校准已过期）" : ""}</option>`).join("");
   $("#enHint").textContent = devs.some((d) => d.calibrationExpired)
-    ? "提示：标红设备校准已过期，用其录入会自动产生“校准失效”告警。" : "";
+    ? "提示：校准过期设备的读数会产生“校准失效”告警；设备仅作用于其匹配指标，其余指标按人工读数提交。"
+    : "设备仅作用于其关联监测点的匹配指标；其他指标按人工读数提交。";
 }
 document.addEventListener("change", (e) => { if (e.target.id === "enPoint") { fillMetrics(); fillDevices(); } });
 
-function collectReading() {
+function collectItems() {
   const measuredAt = new Date($("#enTime").value).toISOString();
+  const dev = state.devices.find((x) => x.id === $("#enDevice").value) || null;
+  const devMetric = dev && (dev.metric === "temperature" ? "temp" : dev.metric);
   const values = {};
   $$("#enMetrics input[data-metric]").forEach((inp) => {
     if (inp.value !== "") values[inp.dataset.metric] = Number(inp.value);
   });
-  return { pointId: $("#enPoint").value, deviceId: $("#enDevice").value || null, measuredAt, values, note: $("#enNote").value };
+  // 设备只能用于其关联监测点且指标匹配；不匹配的指标按人工读数（不带设备）提交
+  return Object.entries(values).map(([metric, value]) => ({
+    pointId: $("#enPoint").value,
+    deviceId: dev && devMetric === metric ? dev.id : null,
+    measuredAt,
+    values: { [metric]: value },
+    note: $("#enNote").value,
+  }));
 }
 
 async function submitReading() {
-  const body = collectReading();
-  if (!Object.keys(body.values).length) return toast("请至少填写一项读数");
+  const items = collectItems();
+  if (!items.length) return toast("请至少填写一项读数");
   try {
-    const r = await api("/api/readings", { method: "POST", body: JSON.stringify(body) });
-    const abnormal = r.readings.filter((x) => x.abnormal);
-    if (abnormal.length) toast(`已录入，${abnormal.length} 项异常并生成/更新告警`, "err");
+    let abnormalCount = 0;
+    if (items.length === 1) {
+      const r = await api("/api/readings", { method: "POST", body: JSON.stringify(items[0]) });
+      abnormalCount = r.readings.filter((x) => x.abnormal).length;
+    } else {
+      const r = await api("/api/readings/batch", { method: "POST", body: JSON.stringify({ items }) });
+      abnormalCount = r.readings.filter((x) => x.abnormal).length;
+    }
+    if (abnormalCount) toast(`已录入，${abnormalCount} 项异常并生成/更新告警`, "err");
     else toast("读数已录入，全部正常", "ok");
     $("#enNote").value = "";
     await Promise.all([loadPoints(), loadStats()]);
@@ -175,17 +192,17 @@ async function submitReading() {
 }
 
 async function concurrentDouble() {
-  const body = collectReading();
-  if (!Object.keys(body.values).length) return toast("请先填写读数");
+  const items = collectItems();
+  if (!items.length) return toast("请先填写读数");
   const key = "demo-" + Date.now();
   const headers = { "Content-Type": "application/json", Authorization: "Bearer " + state.token, "Idempotency-Key": key };
   try {
     const [a, b] = await Promise.all([
-      fetch("/api/readings", { method: "POST", headers, body: JSON.stringify(body) }).then((r) => r.json()),
-      fetch("/api/readings", { method: "POST", headers, body: JSON.stringify(body) }).then((r) => r.json()),
+      fetch("/api/readings/batch", { method: "POST", headers, body: JSON.stringify({ items }) }).then((r) => r.json()),
+      fetch("/api/readings/batch", { method: "POST", headers, body: JSON.stringify({ items }) }).then((r) => r.json()),
     ]);
     const dup = [a, b].filter((x) => x.repeated).length;
-    toast(`并发双发完成：${dup} 个请求被识别为重复提交（accepted=${(a.accepted || 0) + (b.repeated ? 0 : (b.accepted || 0))}）`, dup ? "ok" : "err");
+    toast(`并发双发完成：${dup} 个请求被识别为重复提交（accepted=${a.accepted || 0}）`, dup ? "ok" : "err");
     await Promise.all([loadPoints(), loadStats()]); fillMetrics(); loadRecent();
   } catch (e) { toast(e.message); }
 }
@@ -266,9 +283,9 @@ async function renderInspections() {
   const list = await api("/api/inspections");
   $("#inRows").innerHTML = list.map((x) => `
     <tr>
-      <td>${x.date} ${x.shiftName}<div class="muted small">${x.windowStart.slice(11, 16)}–${x.windowEnd.slice(11, 16)}</div></td>
+      <td>${x.date} ${x.shiftName}<div class="muted small">本地 ${x.localWindowStart.slice(11)}–${x.localWindowEnd.slice(11)}</div></td>
       <td>${x.roomName}</td>
-      <td class="small">${x.windowStart.replace("T", " ").slice(0, 16)} ~<br>${x.windowEnd.replace("T", " ").slice(0, 16)}（+60 分钟宽限）</td>
+      <td class="small">${x.localWindowStart} ~<br>${x.localWindowEnd}（${x.timeZone || state.meta?.timeZone}，+60 分钟宽限）</td>
       <td><span class="pill ${x.status}">${{ pending: "待检", submitted: "已提交", missed: "漏检", no_points: "无监测点" }[x.status]}</span>${x.status === "missed" ? '<div class="muted small">系统重启恢复时自动标记</div>' : ""}</td>
       <td>${inspectionActions(x)}</td>
     </tr>`).join("") || `<tr><td colspan="5" class="muted">暂无巡检</td></tr>`;
@@ -347,6 +364,7 @@ async function createRect() {
 
 // ---------------- 配置 ----------------
 function renderConfig() {
+  $("#cfgTimeZone").value = state.meta.timeZone || "";
   $("#cfRScene").innerHTML = Object.entries(state.meta.scenes).map(([k, v]) => `<option value="${k}">${v.label}</option>`).join("");
   $("#cfPRoom").innerHTML = state.rooms.map((r) => `<option value="${r.id}">${r.name}</option>`).join("");
   $("#cfgPoints").innerHTML = state.rooms.map((room) => `
@@ -398,6 +416,16 @@ window.saveThreshold = async (pointId, metric) => {
     toast("阈值已更新（对之后录入生效）", "ok");
   } catch (e) { toast(e.message); }
 };
+async function saveTimeZone() {
+  const timeZone = $("#cfgTimeZone").value.trim();
+  if (!timeZone) return toast("请填写 IANA 时区，如 Asia/Shanghai");
+  try {
+    await api("/api/config/timezone", { method: "PUT", body: JSON.stringify({ timeZone }) });
+    state.meta.timeZone = timeZone;
+    toast(`时区已保存：${timeZone}（新巡检按此时区生成窗口）`, "ok");
+    renderInspections();
+  } catch (e) { toast(e.message); }
+}
 async function addRoom() {
   try {
     await api("/api/rooms", { method: "POST", body: JSON.stringify({
@@ -441,6 +469,7 @@ $("#inSweep").onclick = async () => {
 };
 $("#rcCreate").onclick = createRect;
 $("#cfRAdd").onclick = addRoom;
+$("#cfgTzSave").onclick = saveTimeZone;
 $("#cfPAdd").onclick = addPoint;
 $("#cfCAdd").onclick = addCalibration;
 
