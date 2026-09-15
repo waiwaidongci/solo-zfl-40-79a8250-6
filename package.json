@@ -1,9 +1,14 @@
 {
-  "name": "zfl-40-cyanotype-negative-room",
+  "name": "cyanotype-darkroom-monitor",
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "description": "蓝晒工作室暗房安全与环境监测台：房间/监测点/校准管理、读数告警状态机、班次巡检、整改闭环",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

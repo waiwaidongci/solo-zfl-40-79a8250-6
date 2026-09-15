@@ -1,9 +1,85 @@
-# 古法蓝晒底片整理室
+# 蓝晒工作室 · 暗房安全与环境监测台
 
-运行：
+暗房环境安全监测与告警闭环系统：登记房间、监测点、设备与校准，按时间录入
+**温湿度、紫外强度、通风风速、水洗酸碱度**，阈值/校准双校验自动告警，连续异常升级，
+恢复正常后经人工复核关闭；巡检按班次生成，漏检/重复/越点一律拒绝；整改必须关联告警。
+
+零依赖（仅 Node 内置模块），JSON 原子持久化。
+
+## 运行
 
 ```bash
-npm start
+npm start          # http://localhost:3040
+npm test           # node:test，11 个集成测试
+PORT=8080 npm start
+DB_PATH=/tmp/x.json npm start
 ```
 
-访问`http://localhost:3040`。数据保存在`data/cyanotype-negative-room.json`。
+首次启动自动写入种子数据 `data/darkroom-monitor.json`。
+
+### 演示账号
+
+| 账号 | 密码 | 角色 | 房间范围 |
+| --- | --- | --- | --- |
+| admin | admin123 | 管理员（配置/复核/回滚） | 全部 |
+| safety | safe123 | 安全员（校准/复核/整改/巡检） | 全部 |
+| tech1 | tech123 | 技师（录入/巡检提交） | 仅一号暗房 R1 |
+| tech2 | tech123 | 技师 | 仅水洗间 R3 |
+
+种子中已内置：一台校准过期的 pH 计（D6）、一个停用监测点（P4）、3 个场景房间。
+
+## 领域规则
+
+- **阈值**：每点每指标有预警/严重双阈值（场景默认、可按点覆盖）。**边界值等于阈值算正常**，越过才异常；越过严重阈值立即严重。
+- **校准**：读数可带设备；设备在测量时刻无有效校准记录（过期/缺失）时读数仍入库，但判定 `cal_expired` 异常。
+- **告警状态机**：`open`（最新读数异常）→ 来一条正常读数 → `pending_review`（待复核）→ 安全员/管理员确认 → `closed`。
+  - 同一事件未人工关闭前再次异常会**重新打开同一条告警**；
+  - 连续异常计数跨零星正常读数累计，达到 3 次（或出现严重级）升级 `critical`；
+  - `open` 状态禁止复核关闭（必须先恢复正常）。
+- **告警按历史读数重建**：乱序补录（7 天窗口内）、读数回滚后，告警区间/计数/级别由全量读数重算，结果幂等。
+- **巡检**：按日期×班次（早/中/夜，夜班跨天）为每个启用房间生成，含全部启用监测点。
+  - 班次未开始提交 = 越点拒绝；少点 = 漏检拒绝；多点 = 越点拒绝；重复点拒绝；整单重复提交拒绝；异常项必须填说明。
+  - 窗口结束 + 60 分钟宽限期未提交 → `missed`；**服务重启时自动扫描标记（重启恢复）**。
+- **整改**：必须关联一条存在的告警，支持责任人/期限/闭环说明；被整改引用的告警读数禁止回滚。
+
+## 接口（节选）
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/api/auth/login` `/api/auth/logout` | 令牌登录/登出 |
+| GET/POST | `/api/rooms` `/api/points` `/api/devices` `/api/calibrations` | 配置（管理员/安全员） |
+| PATCH | `/api/points/:id` | 停用/启用监测点、改阈值 |
+| POST | `/api/readings` | 录入读数（支持 `Idempotency-Key` 头） |
+| POST | `/api/readings/batch` | 批量录入，**事务**：任一非法整批回滚 |
+| POST | `/api/readings/rollback` | 按 id/条件回滚读数并重建告警（关联整改则拒绝） |
+| GET | `/api/alerts` · POST `/api/alerts/:id/close` | 告警筛选、复核关闭 |
+| POST | `/api/inspections/generate` · `/inspections` · `/inspections/:id/submit` · `/inspections/sweep` | 巡检 |
+| POST | `/api/rectifications` · `/:id/close` | 整改（必须带 `alertId`） |
+| GET | `/api/stats` | 顶部统计 |
+
+错误统一 `{ "error": "<code>", "detail": ... }`。测试钩子 `X-Now: <ISO>` 可覆盖服务端当前时间。
+
+### 并发与一致性
+
+- 所有写操作经单一串行队列 + 快照回滚，落盘为临时文件 `rename` 原子替换；
+- 并发同点同指标同时刻录入：一个成功，其余 `409 duplicate_reading`；
+- 相同 `Idempotency-Key` 的并发请求只执行一次，其余返回同一结果（`repeated:true`）；
+- 补录/回滚后告警由读数全量重建，不依赖调用顺序。
+
+## 测试覆盖
+
+`npm test`（`test/api.test.js`）：阈值上下限边界与连续升级、校准失效、停用监测点、
+越权（垂直+水平房间范围）、并发重复/幂等、乱序补录与 7 天窗口、批量回滚、回滚被整改阻断、
+巡检漏检/重复/越点/逾期漏检、重启后状态恢复。
+
+## 代码结构
+
+```
+server.js          入口（加载、启动恢复扫描、静态页/API）
+src/store.js       JSON 原子持久化、写队列、事务快照回滚、幂等
+src/domain.js      阈值/校准判定、告警状态机重建、班次窗口、漏检扫描
+src/seed.js        房间/点/设备/校准/账号种子
+src/routes.js      全部 HTTP 接口与视图
+public/            单页前端（配置/录入/告警/巡检/整改五个页签）
+test/api.test.js   集成测试
+```

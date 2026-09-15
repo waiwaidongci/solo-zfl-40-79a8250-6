@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>蓝晒暗房安全与环境监测台</title>
+<style>
+  :root{
+    --bg:#0e141c; --panel:#16202c; --panel2:#1d2a38; --ink:#dce7f2; --muted:#8298ad;
+    --line:#2a3b4d; --accent:#3d8fd1; --cyan:#36b6c9; --ok:#4caf7d; --warn:#e0a23a; --crit:#e05d5d;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 Arial,"PingFang SC","Microsoft YaHei",sans-serif}
+  header{padding:16px 24px;background:linear-gradient(90deg,#12202e,#162a3a);border-bottom:1px solid var(--line);display:flex;align-items:center;gap:18px;flex-wrap:wrap}
+  header h1{margin:0;font-size:20px;letter-spacing:1px}
+  header .sub{color:var(--muted);font-size:12px}
+  nav{display:flex;gap:4px;margin-left:auto;flex-wrap:wrap}
+  nav button{background:transparent;color:var(--muted);border:1px solid transparent;border-radius:8px 8px 0 0;padding:9px 16px;cursor:pointer;font:inherit;font-weight:700}
+  nav button.active{background:var(--panel);color:var(--cyan);border-color:var(--line);border-bottom-color:var(--panel)}
+  main{padding:20px 24px;max-width:1280px;margin:0 auto}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px}
+  .panel h2{margin:0 0 12px;font-size:16px;color:var(--cyan)}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:16px}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+  .stat b{display:block;font-size:26px}
+  .stat span{color:var(--muted);font-size:12px}
+  .stat.crit b{color:var(--crit)} .stat.warn b{color:var(--warn)} .stat.ok b{color:var(--ok)}
+  label{display:block;color:var(--muted);font-size:12px;margin:8px 0 3px}
+  input,select,textarea{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:7px;color:var(--ink);padding:8px 10px;font:inherit}
+  textarea{min-height:56px}
+  button.btn{background:var(--accent);color:#fff;border:0;border-radius:7px;padding:9px 16px;font-weight:700;cursor:pointer;margin-top:12px}
+  button.btn.sec{background:#33475c} button.btn.danger{background:var(--crit)} button.btn.ok{background:var(--ok)}
+  button.btn:disabled{opacity:.45;cursor:not-allowed}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{border-bottom:1px solid var(--line);padding:8px 9px;text-align:left;vertical-align:top}
+  th{color:var(--muted);font-weight:600;white-space:nowrap}
+  .pill{display:inline-block;border-radius:999px;padding:2px 9px;font-size:12px;border:1px solid var(--line)}
+  .pill.open{color:#fff;background:var(--crit);border-color:var(--crit)}
+  .pill.pending_review{background:rgba(224,162,58,.18);color:var(--warn);border-color:var(--warn)}
+  .pill.closed{background:rgba(76,175,125,.15);color:var(--ok);border-color:var(--ok)}
+  .pill.critical{color:#fff;background:var(--crit)} .pill.warning{color:#1a1a1a;background:var(--warn)}
+  .pill.missed{color:#fff;background:var(--crit)} .pill.submitted{color:var(--ok);border-color:var(--ok)}
+  .pill.pending{color:var(--warn);border-color:var(--warn)} .pill.disabled{color:var(--muted)} .pill.active{color:var(--ok);border-color:var(--ok)}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:end}
+  .row > div{flex:1;min-width:140px}
+  .muted{color:var(--muted)} .small{font-size:12px}
+  .toast{position:fixed;right:20px;bottom:20px;max-width:420px;z-index:50;display:grid;gap:8px}
+  .toast div{border-radius:8px;padding:10px 14px;border:1px solid var(--line);background:var(--panel2)}
+  .toast .err{border-color:var(--crit);color:#ffb3b3} .toast .ok{border-color:var(--ok);color:#b9f0d2}
+  #login{max-width:380px;margin:8vh auto}
+  .tabhide{display:none}
+  .metric-input{display:grid;grid-template-columns:110px 1fr;gap:8px;align-items:center;margin-bottom:6px}
+  code{color:var(--cyan)}
+  .alert-card{border:1px solid var(--line);border-radius:9px;padding:12px;margin-bottom:10px;background:var(--panel2)}
+  .alert-card.sev-critical{border-left:4px solid var(--crit)}
+  .alert-card.sev-warning{border-left:4px solid var(--warn)}
+  .reasons{color:var(--warn);font-size:12px}
+  details summary{cursor:pointer;color:var(--muted);margin:6px 0}
+</style>
+</head>
+<body>
+
+<div id="loginView">
+  <div class="panel" id="login">
+    <h2>蓝晒暗房安全与环境监测台</h2>
+    <div class="muted small">暗房安全与环境监测台 · 登录</div>
+    <label>用户名</label><input id="liUser" value="admin">
+    <label>密码</label><input id="liPw" type="password" value="admin123">
+    <button class="btn" id="liBtn">登录</button>
+    <div class="muted small" style="margin-top:10px">演示账号：admin/admin123、safety/safe123、tech1/tech123（仅一号暗房）、tech2/tech123（仅水洗间）</div>
+  </div>
+</div>
+
+<div id="appView" class="tabhide">
+  <header>
+    <div>
+      <h1>蓝晒暗房安全与环境监测台</h1>
+      <div class="sub">温湿度 · 紫外 · 通风风速 · 水洗 pH —— 阈值与校准双校验，连续异常升级，恢复复核关闭</div>
+    </div>
+    <nav id="tabs">
+      <button data-tab="entry" class="active">录入</button>
+      <button data-tab="alerts">告警</button>
+      <button data-tab="inspect">巡检</button>
+      <button data-tab="rectify">整改</button>
+      <button data-tab="config">配置</button>
+    </nav>
+    <div class="small"><span id="who"></span> <button class="btn sec" id="logoutBtn" style="margin:0;padding:5px 12px">退出</button></div>
+  </header>
+
+  <div class="toast" id="toast"></div>
+  <main>
+    <div class="stats" id="stats"></div>
+
+    <!-- 录入 -->
+    <section data-pane="entry">
+      <div class="panel">
+        <h2>读数录入（阈值 + 校准有效期双校验，自动告警）</h2>
+        <div class="row">
+          <div><label>监测点</label><select id="enPoint"></select></div>
+          <div><label>设备（可选，不带设备不做校准校验）</label><select id="enDevice"></select></div>
+          <div><label>测量时间</label><input id="enTime" type="datetime-local"></div>
+        </div>
+        <div id="enMetrics" style="margin-top:10px"></div>
+        <label>备注</label><input id="enNote" placeholder="异常工况说明…">
+        <button class="btn" id="enSubmit">提交读数</button>
+        <button class="btn sec" id="enBatch">模拟并发双发（幂等键）</button>
+        <div class="muted small" style="margin-top:8px" id="enHint"></div>
+      </div>
+      <div class="panel">
+        <h2>最近读数 <button class="btn sec" style="margin:0;padding:5px 12px;float:right" id="enRefresh">刷新</button></h2>
+        <table><thead><tr><th>时间</th><th>房间/点</th><th>指标</th><th>值</th><th>校准</th><th>判定</th></tr></thead>
+        <tbody id="enRows"></tbody></table>
+      </div>
+    </section>
+
+    <!-- 告警 -->
+    <section data-pane="alerts" class="tabhide">
+      <div class="panel">
+        <div class="row">
+          <div><label>状态</label><select id="alStatus"><option value="">全部</option><option value="open">异常中</option><option value="pending_review">待复核</option><option value="closed">已关闭</option></select></div>
+          <div><label>级别</label><select id="alSev"><option value="">全部</option><option value="critical">严重</option><option value="warning">预警</option></select></div>
+          <div style="flex:0"><button class="btn" id="alRefresh">查询</button></div>
+        </div>
+      </div>
+      <div id="alList"></div>
+    </section>
+
+    <!-- 巡检 -->
+    <section data-pane="inspect" class="tabhide">
+      <div class="panel admin safety">
+        <h2>按班次生成巡检</h2>
+        <div class="row">
+          <div><label>日期</label><input id="inDate" type="date"></div>
+          <div><label>班次</label><select id="inShift"></select></div>
+          <div style="flex:0"><button class="btn" id="inGen">生成巡检</button>
+          <button class="btn sec" id="inSweep">漏检扫描（重启恢复）</button></div>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>巡检单</h2>
+        <table><thead><tr><th>日期/班次</th><th>房间</th><th>提交窗口</th><th>状态</th><th>操作</th></tr></thead>
+        <tbody id="inRows"></tbody></table>
+      </div>
+    </section>
+
+    <!-- 整改 -->
+    <section data-pane="rectify" class="tabhide">
+      <div class="panel admin safety">
+        <h2>新建整改（必须关联告警）</h2>
+        <div class="row">
+          <div><label>关联告警</label><select id="rcAlert"></select></div>
+          <div><label>整改措施</label><input id="rcAction" placeholder="如：更换排风过滤棉并复测风速"></div>
+          <div><label>责任人</label><input id="rcOwner"></div>
+          <div><label>整改期限</label><input id="rcDue" type="date"></div>
+          <div style="flex:0"><button class="btn" id="rcCreate">提交整改</button></div>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>整改记录</h2>
+        <table><thead><tr><th>告警</th><th>措施</th><th>责任人</th><th>期限</th><th>状态</th><th>操作</th></tr></thead>
+        <tbody id="rcRows"></tbody></table>
+      </div>
+    </section>
+
+    <!-- 配置 -->
+    <section data-pane="config" class="tabhide">
+      <div class="panel admin">
+        <h2>房间 / 监测点</h2>
+        <div id="cfgPoints"></div>
+        <details>
+          <summary>+ 新增房间 / 监测点</summary>
+          <div class="grid2">
+            <div>
+              <h3>新房间</h3>
+              <label>编号</label><input id="cfRCode" placeholder="DR-03">
+              <label>名称</label><input id="cfRName">
+              <label>场景</label><select id="cfRScene"></select>
+              <label>位置</label><input id="cfRLoc">
+              <button class="btn" id="cfRAdd">新建房间</button>
+            </div>
+            <div>
+              <h3>新监测点</h3>
+              <label>房间</label><select id="cfPRoom"></select>
+              <label>编号</label><input id="cfPCode">
+              <label>名称</label><input id="cfPName">
+              <button class="btn" id="cfPAdd">新建监测点（阈值取场景默认）</button>
+            </div>
+          </div>
+        </details>
+      </div>
+      <div class="panel admin safety">
+        <h2>设备与校准</h2>
+        <table><thead><tr><th>设备</th><th>适用点</th><th>当前校准有效期至</th><th>状态</th></tr></thead><tbody id="cfgDevices"></tbody></table>
+        <details>
+          <summary>+ 登记校准记录</summary>
+          <div class="row">
+            <div><label>设备</label><select id="cfCDev"></select></div>
+            <div><label>校准机构</label><input id="cfCOrg"></div>
+            <div><label>证书号</label><input id="cfCCert"></div>
+            <div><label>结果</label><select id="cfCResult"><option value="pass">合格</option><option value="fail">不合格</option></select></div>
+            <div><label>生效</label><input id="cfCFrom" type="date"></div>
+            <div><label>到期</label><input id="cfCUntil" type="date"></div>
+            <div style="flex:0"><button class="btn" id="cfCAdd">登记校准</button></div>
+          </div>
+        </details>
+      </div>
+      <div class="panel admin">
+        <h2>监测点阈值（边界值=正常，超出才告警）</h2>
+        <div id="cfgThresholds"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
