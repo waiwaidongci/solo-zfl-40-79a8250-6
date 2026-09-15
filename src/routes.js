@@ -215,7 +215,12 @@ export function createApp(store) {
         validFrom: new Date(body.validFrom).toISOString(), validUntil: new Date(body.validUntil).toISOString(),
         recordedAt: nowIso(now), recordedBy: user.id, status: "valid", certificate: body.certificate || "",
       };
-      const out = await store.mutate((d) => { d.calibrations.push(c); return c; });
+      const out = await store.mutate((d) => {
+        // 单调登记序号：同一时刻登记时也能区分先后（后登记的不合格可压过旧合格，反之亦然）
+        c.seq = d.calibrations.reduce((m, x) => Math.max(m, x.seq || 0), 0) + 1;
+        d.calibrations.push(c);
+        return c;
+      });
       return json(res, 201, out.body);
     }
 

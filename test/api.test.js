@@ -520,6 +520,76 @@ test("失败校准：result=fail 不算有效校准；读数判 cal_expired；�
   } finally { h.cleanup(); }
 });
 
+// ---------------- 旧合格记录被更晚的不合格记录覆盖 ----------------
+test("校准覆盖：更晚登记的不合格记录立即压过有效期内的旧合格记录；只能由更新的合格记录恢复", async () => {
+  const h = await makeHarness("cal-override");
+  try {
+    const { call, tokens } = h;
+    // D1（温湿度仪，关联 P1）种子校准 C1：合格，2026-05-18 ~ 2026-11-14，登记于 120 天前
+    const readTemp = (measuredAt) => call("POST", "/api/readings", {
+      pointId: "P1", deviceId: "D1", measuredAt, values: { temp: 20 },
+    }, { token: tokens.admin, now: "2026-09-15T12:00:00Z" });
+
+    // 基线：旧合格记录仍在有效期 → 校准有效
+    let r = await readTemp("2026-09-15T08:00:00Z");
+    assert.equal(r.status, 201);
+    assert.equal(r.json.readings[0].calExpired, false);
+    assert.equal(r.json.readings[0].calId, "C1");
+
+    // 登记时间更晚的不合格记录，有效期覆盖现在及之后 → 立即失效
+    r = await call("POST", "/api/calibrations", {
+      deviceId: "D1", org: "复测", result: "fail", certificate: "FAIL-LATE",
+      validFrom: "2026-09-10T00:00:00Z", validUntil: "2026-12-31T00:00:00Z",
+    }, { token: tokens.safety, now: "2026-09-15T09:00:00Z" });
+    assert.equal(r.status, 201);
+    const failId = r.json.id;
+
+    // 之后的读数：旧合格记录不能继续生效
+    r = await readTemp("2026-09-15T10:00:00Z");
+    assert.equal(r.json.readings[0].calExpired, true);
+    assert.equal(r.json.readings[0].calId, null);
+    assert.deepEqual(r.json.readings[0].reasons, ["cal_expired"]);
+    // /api/devices 也立即反映校准失效
+    const devs = await call("GET", "/api/devices", undefined, { token: tokens.admin });
+    const d1 = devs.json.find((x) => x.id === "D1");
+    assert.equal(d1.calibrationExpired, true);
+    assert.equal(d1.activeCalibration, null);
+
+    // 不合格记录有效期回溯到 09-10：之后补录该窗口内的历史读数也判失效（追溯隔离）
+    r = await readTemp("2026-09-12T08:00:00Z");
+    assert.equal(r.json.readings[0].calExpired, true);
+    assert.equal(r.json.readings[0].calId, null);
+    // 但不合格记录生效之前（09-09）的读数，旧合格记录仍有效
+    r = await readTemp("2026-09-09T08:00:00Z");
+    assert.equal(r.json.readings[0].calExpired, false);
+    assert.equal(r.json.readings[0].calId, "C1");
+
+    // 重新登记一条更新且有效的合格记录 → 恢复合格
+    r = await call("POST", "/api/calibrations", {
+      deviceId: "D1", org: "市计量院", result: "pass", certificate: "PASS-RE",
+      validFrom: "2026-09-15T00:00:00Z", validUntil: "2027-09-15T00:00:00Z",
+    }, { token: tokens.safety, now: "2026-09-15T11:00:00Z" });
+    assert.equal(r.status, 201);
+    const passId = r.json.id;
+    assert.notEqual(passId, failId);
+    r = await readTemp("2026-09-15T11:30:00Z");
+    assert.equal(r.json.readings[0].calExpired, false);
+    assert.equal(r.json.readings[0].calId, passId);
+    const devs2 = await call("GET", "/api/devices", undefined, { token: tokens.admin });
+    assert.equal(devs2.json.find((x) => x.id === "D1").calibrationExpired, false);
+    assert.equal(devs2.json.find((x) => x.id === "D1").activeCalibration.id, passId);
+
+    // 再补一条登记时间更晚的不合格 → 合格记录同样被立即覆盖（恢复不是终态）
+    await call("POST", "/api/calibrations", {
+      deviceId: "D1", org: "抽测", result: "fail", certificate: "FAIL-AGAIN",
+      validFrom: "2026-09-15T00:00:00Z", validUntil: "2027-01-01T00:00:00Z",
+    }, { token: tokens.safety, now: "2026-09-15T11:40:00Z" });
+    r = await readTemp("2026-09-15T11:45:00Z");
+    assert.equal(r.json.readings[0].calExpired, true);
+    assert.equal(r.json.readings[0].calId, null);
+  } finally { h.cleanup(); }
+});
+
 // ---------------- 设备越点 / 指标不匹配 ----------------
 test("设备越点：未关联监测点、指标不匹配、报废设备一律写入前拒绝；批量整体回滚", async () => {
   const h = await makeHarness("device-scope");

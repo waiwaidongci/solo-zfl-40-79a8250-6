@@ -100,12 +100,23 @@ export function toLocalString(iso, timeZone) {
 
 export function activeCalibration(db, deviceId, at) {
   const t = new Date(at).getTime();
-  const list = db.calibrations
-    // 仅“合格 + 有效”的校准可作为有效校准；不合格(fail)或已撤销(void)一律不算
-    .filter((c) => c.deviceId === deviceId && c.status === "valid" && c.result === "pass")
+  // 取测量时点有效期覆盖该时刻的校准记录中“登记时间最新”的一条：
+  // 新登记的不合格记录立即压过仍在有效期内的旧合格记录；只有更新且有效的合格记录才能恢复。
+  const candidates = db.calibrations
+    .filter((c) => c.deviceId === deviceId && c.status === "valid")
     .filter((c) => new Date(c.validFrom).getTime() <= t && t <= new Date(c.validUntil).getTime())
-    .sort((a, b) => new Date(b.recordedAt) - new Date(a.recordedAt));
-  return list[0] || null;
+    .sort((a, b) => {
+      const d = new Date(b.recordedAt) - new Date(a.recordedAt);
+      if (d !== 0) return d;
+      // 同一时刻登记：按登记顺序（seq）取更晚的一条；导入数据无 seq 时保守地以不合格优先
+      const sa = a.seq ?? 0, sb = b.seq ?? 0;
+      if (sb !== sa) return sb - sa;
+      if (a.result !== b.result) return a.result === "fail" ? -1 : 1;
+      return a.id < b.id ? -1 : 1;
+    });
+  const latest = candidates[0];
+  if (!latest || latest.result !== "pass") return null;
+  return latest;
 }
 
 // 设备能否用于某监测点：存在、在用、已关联该点、设备指标与该点监测指标匹配
